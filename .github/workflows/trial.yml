@@ -108,29 +108,30 @@ jobs:
           S=/tmp/stage; mkdir -p "$S/jobs"
           # the newest job folder trial.py wrote for this slug+model
           jd=$(ls -dt "$HOME/.tb-graders/cwe/jobs/$SLUG-$MODEL"* 2>/dev/null | head -1 || true)
-          python3 - "$S/divq-result.json" "$TID" "$MODEL" "$RUN" "$REL" "$jd" "${{ github.repository_owner }}" <<'PY'
-          import json, sys, glob, os
-          out, tid, model, run, rel, jd, acct = sys.argv[1:8]
-          reward, graded, infra = None, False, None
-          if jd and os.path.isdir(jd):
-              rf = glob.glob(os.path.join(jd, "**", "verifier", "reward.json"), recursive=True) or \
-                   glob.glob(os.path.join(jd, "**", "reward.txt"), recursive=True)
-              for p in rf:
-                  try:
-                      t = open(p).read().strip()
-                      reward = json.loads(t).get("reward") if p.endswith(".json") else float(t)
-                      graded = reward is not None
-                  except Exception:
-                      pass
-          if not graded:
-              infra = "no reward (infra/ungraded; divq retries, never counts as a model fail)"
+          python3 - "$S/divq-result.json" "$TID" "$MODEL" "$RUN" "$REL" "$jd" "${{ github.repository_owner }}" "build/$SLUG/trial_detail_$MODEL.json" <<'PY'
+          import json, sys
+          out, tid, model, run, rel, jd, acct, detail_path = sys.argv[1:9]
+          reward, graded, infra = None, False, "missing authoritative trial detail"
+          try:
+              detail = json.load(open(detail_path))
+              records = [r for r in detail.get("runs", [])
+                         if r.get("model") == model and int(r.get("run", -1)) == int(run)]
+              if records:
+                  latest = records[-1]
+                  # trial.py already distinguishes agent cuts from graded timeouts.
+                  # Re-reading raw verifier rewards would undo that decision.
+                  reward = latest.get("reward")
+                  graded = reward is not None
+                  infra = None if graded else (latest.get("cause") or "ungraded trial")
+          except (OSError, ValueError, TypeError):
+              infra = "authoritative trial detail unreadable"
           json.dump({"kind": "trial", "tid": tid, "model": model, "run": int(run), "release": rel,
                      "account": acct, "graded": graded, "reward": reward, "infra_reason": infra}, open(out, "w"))
           print("DIVQ-RESULT", tid, model, "run", run, "graded", graded, "reward", reward)
           PY
-          # transcript + grading for the VM audit (bounded)
-          [ -n "$jd" ] && find "$jd" -maxdepth 5 \( -name '*.json' -o -name '*.log' -o -name '*.txt' \) -size -512k \
-            -exec cp --parents {} "$S/jobs/" \; 2>/dev/null || true
+          # Preserve the complete trial evidence, including harvested final code, for VM audits.
+          [ -n "$jd" ] && [ -d "$jd" ] && cp -a "$jd" "$S/jobs/" || true
+          cp "build/$SLUG/trial_detail_$MODEL.json" "$S/" 2>/dev/null || true
           cp /tmp/trial.out "$S/" 2>/dev/null || true
           tar -czf /tmp/out.tgz -C "$S" .
           gpg --batch --quiet --pinentry-mode loopback --passphrase "$PAYLOAD_KEY" --symmetric --cipher-algo AES256 -o "/tmp/${{ inputs.job }}.tgz.gpg" /tmp/out.tgz
